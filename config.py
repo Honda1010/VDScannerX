@@ -4,8 +4,8 @@ import os
 class Config:
     # API Configuration
     VIRUSTOTAL_API_KEY = '1f943b55964dc8763921324f04fe0885fa7d212e10502e11320446c2e28278bb'
+    VT_DYNAMIC_API_KEY = 'af327565c031af77d58d9f5b062e2840c7bb2e269802ff087d70d6a81484e8d5'
     HYBRID_ANALYSIS_API_KEY = 'swwy0tx86d507b75m4e63m05848d6fcfl7q9hpxqecfd1030vdiw15jv8a3fcdf7'
-    
     # File System Configuration
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     OUTPUT_FOLDER = os.path.join(BASE_DIR, 'output_pdf')

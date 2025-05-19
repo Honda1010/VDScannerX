@@ -1,16 +1,24 @@
 import requests
 import time
 import json
+import os
 from config import Config
 from src.utils.json_saver import JSONSaver
 
 class DynamicAnalyzer:
     def __init__(self):
         self.API_KEY = Config.HYBRID_ANALYSIS_API_KEY
+        self.VT_API_KEY = Config.VT_DYNAMIC_API_KEY  # Use the dedicated VT key
         self.HEADERS = {
             'api-key': self.API_KEY,
             'User-Agent': 'VxApi Client'
         }
+        # VirusTotal specific headers
+        self.VT_HEADERS = {
+            'x-apikey': self.VT_API_KEY,
+            'User-Agent': 'VDScannerX-Client'
+        }
+        self.VT_BASE_URL = "https://www.virustotal.com/api/v3"
 
     def submit_file(self, file_path):
         with open(file_path, 'rb') as f:
@@ -163,3 +171,362 @@ class DynamicAnalyzer:
                 'success': False,
                 'error': str(e)
             }
+
+    def submit_file_to_vt(self, file_path):
+        """Submit a file to VirusTotal for analysis"""
+        # Prepare the file for upload
+        with open(file_path, 'rb') as file:
+            files = {'file': (os.path.basename(file_path), file)}
+            url = f"{self.VT_BASE_URL}/files"
+            
+            print("Uploading file to VirusTotal...")
+            
+            response = requests.post(url, headers=self.VT_HEADERS, files=files)
+            
+            if response.status_code == 200:
+                json_response = response.json()
+                JSONSaver.save_api_response(json_response, 'virustotal_upload')
+                
+                # The API might return data directly or an analysis ID
+                if 'data' in json_response:
+                    if 'id' in json_response['data']:
+                        analysis_id = json_response['data']['id']
+                    else:
+                        analysis_id = None
+                    
+                    # Get the file hash from either direct response or attributes
+                    if 'attributes' in json_response['data'] and 'sha256' in json_response['data']['attributes']:
+                        file_hash = json_response['data']['attributes']['sha256']
+                    elif 'sha256' in json_response['data']:
+                        file_hash = json_response['data']['sha256']
+                    else:
+                        # If hash not in response, compute it
+                        import hashlib
+                        with open(file_path, 'rb') as f:
+                            file_hash = hashlib.sha256(f.read()).hexdigest()
+                    
+                    return {'analysis_id': analysis_id, 'file_hash': file_hash}
+            
+            # If we reach here, something went wrong
+            error_msg = f"Error uploading file: Status code {response.status_code}"
+            if response.text:
+                error_msg += f" - {response.text}"
+            raise Exception(error_msg)
+
+    def wait_for_vt_analysis(self, analysis_id):
+        """Wait for VirusTotal analysis to complete"""
+        if not analysis_id:
+            print("No analysis ID provided. Skipping wait.")
+            return True
+            
+        url = f"{self.VT_BASE_URL}/analyses/{analysis_id}"
+        max_attempts = 10  # Wait up to ~1 minute (10 attempts * 6 seconds)
+        
+        for attempt in range(max_attempts):
+            response = requests.get(url, headers=self.VT_HEADERS)
+            
+            if response.status_code == 200:
+                json_response = response.json()
+                status = json_response.get('data', {}).get('attributes', {}).get('status')
+                
+                if status == 'completed':
+                    return True
+                
+                if status == 'failed':
+                    raise Exception("VirusTotal analysis failed")
+            
+            # Wait before trying again
+            time.sleep(6)
+            print(f"Waiting for analysis to complete... Attempt {attempt + 1}/{max_attempts}")
+        
+        # Just continue even if it times out - the file might still have behavior reports
+        print("Analysis wait time exceeded. Proceeding anyway.")
+        return True
+
+    def get_behavior_report(self, file_hash):
+        """Get behavioral analysis data from VirusTotal using a hash"""
+        url = f"{self.VT_BASE_URL}/files/{file_hash}/behaviours"
+        response = requests.get(url, headers=self.VT_HEADERS)
+        
+        if response.status_code == 200:
+            json_response = response.json()
+            JSONSaver.save_api_response(json_response, 'virustotal_behavior')
+            return self._process_behavior_data(json_response.get('data', []))
+        else:
+            print(f"[Error] Behavior data not retrieved: {response.status_code} - {response.text}")
+        return None
+
+    def get_behavior_report_from_file(self, file_path):
+        """Upload a file to VirusTotal and get its behavior report"""
+        print(f"Uploading file to VirusTotal: {os.path.basename(file_path)}")
+        
+        # Step 1: Upload the file
+        upload_result = self.submit_file_to_vt(file_path)
+        file_hash = upload_result['file_hash']
+        analysis_id = upload_result['analysis_id']
+        
+        print(f"File uploaded successfully. Hash: {file_hash}")
+        
+        # Step 2: Wait for analysis to complete
+        self.wait_for_vt_analysis(analysis_id)
+        
+        print("Analysis completed. Retrieving behavior report...")
+        
+        # Step 3: Get behavior report using the file hash
+        return self.get_behavior_report(file_hash)
+
+    def _process_behavior_data(self, behavior_data):
+        """Process and structure behavior data from VirusTotal API"""
+        if not behavior_data:
+            return None
+
+        processed_data = {
+            'summary': {},
+            'processes': [],
+            'process_tree': {},  # For process hierarchy 
+            'process_service_actions': [],  # New field for process and service actions
+            'network_communications': [],
+            'registry_keys': [],
+            'files': [],
+            'mutexes': [],
+            'mitre_attacks': [],
+            'dns_requests': [],
+            'http_requests': [],
+            'dropped_files': [],
+            'stealth_network': {
+                'ips': [],
+                'domains': []
+            },
+            'signature_http_requests': []
+        }
+
+        for behavior in behavior_data:
+            attributes = behavior.get('attributes', {})
+            sandbox_name = attributes.get('sandbox_name', 'Unknown Sandbox')
+
+            # Extract process_tree if available
+            if attributes.get('processes_tree'):
+                if sandbox_name not in processed_data['process_tree']:
+                    processed_data['process_tree'][sandbox_name] = attributes.get('processes_tree', [])
+            
+            # Gather process actions
+            process_actions = []
+            
+            # Process creations 
+            if attributes.get('processes_created'):
+                for proc in attributes.get('processes_created', []):
+                    process_actions.append({
+                        'type': 'process_created',
+                        'process': proc,
+                        'sandbox': sandbox_name
+                    })
+            
+            # Process terminations
+            if attributes.get('processes_terminated'):
+                for proc in attributes.get('processes_terminated', []):
+                    process_actions.append({
+                        'type': 'process_terminated',
+                        'process': proc,
+                        'sandbox': sandbox_name
+                    })
+                
+            # Service operations
+            if attributes.get('services_opened'):
+                for svc in attributes.get('services_opened', []):
+                    process_actions.append({
+                        'type': 'service_opened',
+                        'service': svc,
+                        'sandbox': sandbox_name
+                    })
+                
+            if attributes.get('services_created'):
+                for svc in attributes.get('services_created', []):
+                    process_actions.append({
+                        'type': 'service_created',
+                        'service': svc,
+                        'sandbox': sandbox_name
+                    })
+                
+            if attributes.get('services_started'):
+                for svc in attributes.get('services_started', []):
+                    process_actions.append({
+                        'type': 'service_started',
+                        'service': svc,
+                        'sandbox': sandbox_name
+                    })
+                
+            if attributes.get('services_stopped'):
+                for svc in attributes.get('services_stopped', []):
+                    process_actions.append({
+                        'type': 'service_stopped',
+                        'service': svc,
+                        'sandbox': sandbox_name
+                    })
+                
+            if attributes.get('services_deleted'):
+                for svc in attributes.get('services_deleted', []):
+                    process_actions.append({
+                        'type': 'service_deleted',
+                        'service': svc,
+                        'sandbox': sandbox_name
+                    })
+            
+            # Add the process actions to our data
+            processed_data['process_service_actions'].extend(process_actions)
+
+            # The rest of the existing code...
+            if sandbox_name not in processed_data['summary']:
+                processed_data['summary'][sandbox_name] = {
+                    'category': attributes.get('category', 'Unknown'),
+                    'platform': attributes.get('platform', 'Unknown'),
+                    'tags': attributes.get('tags', [])
+                }
+
+            # --- Processes ---
+            for process in attributes.get('processes', []):
+                processed_data['processes'].append({
+                    'sandbox': sandbox_name,
+                    'name': process.get('name', 'Unknown'),
+                    'pid': process.get('pid', 'Unknown'),
+                    'parent_pid': process.get('parent_pid', 'Unknown'),
+                    'command_line': process.get('command_line', ''),
+                    'path': process.get('path', ''),
+                    'integrity_level': process.get('integrity_level', ''),
+                    'calls': len(process.get('calls', []))
+                })
+
+            # --- Network Communications ---
+            for comm in attributes.get('network_traffic', {}).get('tcp', []):
+                processed_data['network_communications'].append({
+                    'sandbox': sandbox_name,
+                    'protocol': 'TCP',
+                    'local_address': comm.get('src', ''),
+                    'local_port': comm.get('sport', ''),
+                    'remote_address': comm.get('dst', ''),
+                    'remote_port': comm.get('dport', ''),
+                })
+            for comm in attributes.get('network_traffic', {}).get('udp', []):
+                processed_data['network_communications'].append({
+                    'sandbox': sandbox_name,
+                    'protocol': 'UDP',
+                    'local_address': comm.get('src', ''),
+                    'local_port': comm.get('sport', ''),
+                    'remote_address': comm.get('dst', ''),
+                    'remote_port': comm.get('dport', ''),
+                })
+
+            # --- DNS Requests ---
+            for dns in attributes.get('network_traffic', {}).get('dns', []):
+                processed_data['dns_requests'].append({
+                    'sandbox': sandbox_name,
+                    'hostname': dns.get('hostname', ''),
+                    'resolved_ips': dns.get('resolved_ips', [])
+                })
+
+            # --- HTTP Requests ---
+            for http in attributes.get('network_traffic', {}).get('http', []):
+                processed_data['http_requests'].append({
+                    'sandbox': sandbox_name,
+                    'method': http.get('method', ''),
+                    'url': http.get('url', ''),
+                    'user_agent': http.get('user_agent', '')
+                })
+
+            # --- Registry Keys ---
+            for reg in attributes.get('registry_keys_opened', []):
+                processed_data['registry_keys'].append({
+                    'sandbox': sandbox_name,
+                    'key': reg,
+                    'operation': 'opened'
+                })
+            for reg in attributes.get('registry_keys_set', []):
+                processed_data['registry_keys'].append({
+                    'sandbox': sandbox_name,
+                    'key': reg.get('key', ''),
+                    'value': reg.get('value', ''),
+                    'operation': 'set'
+                })
+
+            # --- Files ---
+            for file in attributes.get('files_opened', []):
+                processed_data['files'].append({
+                    'sandbox': sandbox_name,
+                    'path': file,
+                    'operation': 'opened'
+                })
+            for file in attributes.get('files_created', []):
+                processed_data['files'].append({
+                    'sandbox': sandbox_name,
+                    'path': file,
+                    'operation': 'created'
+                })
+            for file in attributes.get('files_deleted', []):
+                processed_data['files'].append({
+                    'sandbox': sandbox_name,
+                    'path': file,
+                    'operation': 'deleted'
+                })
+
+            # --- Dropped Files ---
+            for drop in attributes.get('dropped_files', []):
+                processed_data['dropped_files'].append({
+                    'sandbox': sandbox_name,
+                    'file_name': drop.get('name', ''),
+                    'file_type': drop.get('type_description', ''),
+                    'sha256': drop.get('sha256', '')
+                })
+
+            # --- Mutexes ---
+            for mutex in attributes.get('mutexes', []):
+                processed_data['mutexes'].append({
+                    'sandbox': sandbox_name,
+                    'name': mutex
+                })
+
+            # --- MITRE ATT&CK ---
+            for attack in attributes.get('mitre_attacks', []):
+                processed_data['mitre_attacks'].append({
+                    'sandbox': sandbox_name,
+                    'id': attack.get('id', ''),
+                    'name': attack.get('name', ''),
+                    'tactic': attack.get('tactic', '')
+                })
+
+        # Add signature-based network data extraction
+        for sandbox in behavior_data:
+            attributes = sandbox.get('attributes', {})
+            
+            # Get signature matches
+            signatures = attributes.get('signature_matches', [])
+            
+            for signature in signatures:
+                # Process stealth network connections
+                if signature.get('name') == 'stealth_network':
+                    match_data = signature.get('match_data', [])
+                    
+                    for data_str in match_data:
+                        try:
+                            data = json.loads(data_str)
+                            if 'ip' in data:
+                                processed_data['stealth_network']['ips'].append(data['ip'])
+                            elif 'domain' in data:
+                                processed_data['stealth_network']['domains'].append(data['domain'])
+                        except:
+                            pass
+                
+                # Process HTTP network data from signatures
+                elif signature.get('name') == 'network_http':
+                    match_data = signature.get('match_data', [])
+                    
+                    for data_str in match_data:
+                        try:
+                            data = json.loads(data_str)
+                            if 'url' in data:
+                                processed_data['signature_http_requests'].append({
+                                    'url': data['url'],
+                                    'sandbox': attributes.get('sandbox_name', 'Unknown')
+                                })
+                        except:
+                            pass
+        
+        return processed_data
