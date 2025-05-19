@@ -19,12 +19,12 @@ class Config:
     # String Filters
     FILTERS = {
         "All": None,
-        "URLs":      re.compile(rb"https?://[^\s\"']+"),
-        "IPs":       re.compile(rb"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"),
-        "Registry":  re.compile(rb"HKEY_[A-Z_\\]+"),
-        "Paths":     re.compile(rb"[A-Za-z]:\\[^:*?\"<>|\r\n]+"),
-        "DLLs":      re.compile(rb"[a-zA-Z0-9_]+\.(dll|DLL)"),
-        "Commands":  re.compile(rb"\b(cmd\.exe|powershell|wmic|whoami|tasklist|netstat|curl|wget)\b", re.IGNORECASE),
+        "URLs":      re.compile(rb"https?://[^\s\"']+"), # Matches URLs not followed by space, double quotes or single quotes
+        "IPs":       re.compile(rb"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"), #matches IP addresses 1–3 digits followed by a dot
+        "Registry":  re.compile(rb"HKEY_[A-Z_\\]+"), #matches the prefix, matches uppercase letters, underscores, and backslashes
+        "Paths":     re.compile(rb"[A-Za-z]:\\[^:*?\"<>|\r\n]+"), #followed by a colon, and then any characters except for the special characters
+        "DLLs":      re.compile(rb"[a-zA-Z0-9_]+\.(dll|DLL)"), #matches DLL files which are alphanumeric characters followed by a dot and then dll or DLL
+        "Commands":  re.compile(rb"\b(cmd\.exe|powershell|wmic|whoami|tasklist|netstat|curl|wget)\b", re.IGNORECASE), #\b(...)\b: ensures the whole word is matched
     }
     
     # PDF Report Configuration

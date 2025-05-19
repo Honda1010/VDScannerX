@@ -6,3 +6,5 @@ if __name__ == "__main__":
     root = ctk.CTk()
     app = MainWindow(root)
     root.mainloop()
+
+# pyinstaller --onefile --windowed --icon=bug.png main.py --- to make the executable file

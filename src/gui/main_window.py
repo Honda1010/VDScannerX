@@ -1092,9 +1092,9 @@ class MainWindow:
         # Detect current mode
         mode = ctk.get_appearance_mode()
         if mode == "Dark":
-            self.output_text.config(bg="#23272f", fg="#f5f5f5", insertbackground="#f5f5f5")
+            self.output_text.configure(bg="#23272f", fg="#f5f5f5", insertbackground="#f5f5f5")
         else:
-            self.output_text.config(bg="#ffffff", fg="#222222", insertbackground="#222222")
+            self.output_text.configure(bg="#ffffff", fg="#222222", insertbackground="#222222")
 
     def upload_sample(self):
         file_path = filedialog.askopenfilename(
